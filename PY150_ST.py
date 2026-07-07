@@ -49,13 +49,18 @@ def generate_ticks(low, high):
     return list(dict.fromkeys(ticks))
 
 def run_analysis(df_excel):
+    # 自動偵測欄位，解決 KeyError
+    col_ticker = df_excel.columns[0]
+    col_name = df_excel.columns[1]
+    
     results, serial_num = [], 1
     total = len(df_excel)
     progress_bar = st.progress(0)
     
     for row_idx, row in df_excel.iterrows():
         progress_bar.progress((row_idx + 1) / total)
-        raw_ticker = str(row[0]).strip()
+        raw_ticker = str(row[col_ticker]).strip()
+        stock_name = str(row[col_name]).strip()
         if raw_ticker.endswith('.0'): raw_ticker = raw_ticker[:-2]
         
         try:
@@ -90,7 +95,7 @@ def run_analysis(df_excel):
                 if t_bin['idx'] - 3 <= curr_idx <= t_bin['idx'] + 3:
                     disp = [{'區間標籤': f"{'🎯 ' if b['idx']==curr_idx else ''}{b['start']:.2f} ~ {b['end']:.2f}", '累積成交量': int(b['vol'])} for b in bins]
                     disp.reverse()
-                    results.append({'代碼': raw_ticker, '個股名稱': str(row[1]).strip(), '當日現價': curr_p, '落點分價': f"第{rank}大量", '分價範圍': f"{t_bin['start']:.2f} ~ {t_bin['end']:.2f}", 'bins_data': disp})
+                    results.append({'代碼': raw_ticker, '個股名稱': stock_name, '當日現價': curr_p, '落點分價': f"第{rank}大量", '分價範圍': f"{t_bin['start']:.2f} ~ {t_bin['end']:.2f}", 'bins_data': disp})
                     break
         except: continue
     progress_bar.empty()
@@ -103,7 +108,9 @@ st.title("📈 台灣50中100分價量試分析")
 file_path = 'TW50100.xlsx'
 
 if os.path.exists(file_path):
+    # 讀取時自動偵測標題列，若無標題則 header=None
     df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
+    
     if st.session_state.analysis_results is None:
         if st.button("🚀 開始分析", type="primary"):
             st.session_state.analysis_results = run_analysis(df)
@@ -112,7 +119,7 @@ if os.path.exists(file_path):
     if st.session_state.analysis_results:
         if st.session_state.selected_stock is None:
             st.subheader("📋 符合條件個股總覽")
-            if st.button("重新分析"): 
+            if st.button("🧹 清除並重新分析"): 
                 st.session_state.analysis_results = None
                 st.rerun()
             for r in st.session_state.analysis_results:
@@ -140,4 +147,4 @@ if os.path.exists(file_path):
                     ).properties(height=550)
                     st.altair_chart(chart, use_container_width=True)
 else:
-    st.error(f"❌ 找不到 {file_path}")
+    st.error(f"❌ 找不到 {file_path}，請確認檔案已上傳至 GitHub 儲存庫。")
