@@ -4,6 +4,7 @@ import yfinance as yf
 import re
 import io
 import os 
+import altair as alt  # 新增：用來繪製可以精準控制排序的圖表
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -13,6 +14,13 @@ from openpyxl.chart import BarChart, Reference
 # 網頁基本設定 (設定為寬螢幕)
 # ==========================================
 st.set_page_config(page_title="台灣50中100分價量試分析", layout="wide", page_icon="📈")
+
+# ==========================================
+# 狀態管理 (Session State) 初始化
+# 用來記錄當前使用者點擊了哪一檔股票
+# ==========================================
+if 'selected_stock' not in st.session_state:
+    st.session_state.selected_stock = None
 
 # ==========================================
 # 台股跳動點與區間函式
@@ -55,12 +63,9 @@ def run_analysis(df_excel):
     results = []
     serial_num = 1
     total_stocks = len(df_excel)
-    
-    # 建立進度條
     progress_bar = st.progress(0)
     
     for row_idx, row in df_excel.iterrows():
-        # 更新進度條
         progress_bar.progress((row_idx + 1) / total_stocks)
         
         if pd.isna(row[col_ticker]) or str(row[col_ticker]).strip().lower() == 'nan':
@@ -167,6 +172,9 @@ def run_analysis(df_excel):
                             '區間標籤': f"{prefix}{b['start']:.2f} ~ {b['end']:.2f}",
                             '累積成交量': int(b['vol'])
                         })
+                    
+                    # 💡 【修改點 3 & 4】：將陣列反轉，確保價格高的在第一筆 (最上面)
+                    disp_bins.reverse()
 
                     results.append({
                         '序號': serial_num,
@@ -184,7 +192,6 @@ def run_analysis(df_excel):
         except Exception:
             continue
             
-    # 分析結束，清空進度條
     progress_bar.empty()
     return results
 
@@ -269,69 +276,108 @@ if os.path.exists(file_path):
         df_excel = pd.read_excel(file_path, engine='openpyxl', dtype=str)
         st.success(f"✅ 已成功自動載入清單：`{file_path}` (共 {len(df_excel)} 檔個股)")
         
-        if st.button("🚀 開始分析", type="primary"):
-            with st.spinner('連線抓取報價與分價量運算中，這可能需要幾分鐘的時間，請稍候...'):
-                results = run_analysis(df_excel)
-            
-            if results:
-                st.success(f"✅ 分析完成！共篩選出 **{len(results)}** 檔符合條件的個股。")
-                
-                # --- 區塊 1：總覽表 (置入頂部錨點) ---
-                st.markdown("<div id='summary-top'></div>", unsafe_allow_html=True)
-                st.subheader("📋 符合條件個股總覽")
-                
-                # 改用 Markdown 生成表格，以支援內部網頁錨點跳轉 (HTML Anchor)
-                md_table = "| 代碼 | 名稱 | 當日現價 | 命中條件 | 大量區範圍 |\n"
-                md_table += "|:---:|:---:|:---:|:---:|:---:|\n"
-                for r in results:
-                    # [顯示文字](#對應的ID) 這是 Markdown 的內部跳轉語法
-                    md_table += f"| {r['代碼']} | [{r['個股名稱']}](#stock-{r['代碼']}) | {r['當日現價']} | {r['落點分價']} | {r['分價範圍']} |\n"
-                
-                st.markdown(md_table)
-                
-                # --- 提供 Excel 下載按鈕 ---
-                excel_data = generate_excel(results)
-                today_str = datetime.now().strftime("%Y%m%d")
-                st.download_button(
-                    label="📥 下載完整含圖表的 Excel 報表",
-                    data=excel_data,
-                    file_name=f"分價每日分析_{today_str}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                
-                st.divider()
-                
-                # --- 區塊 2：各別股票的詳細圖表 ---
-                st.subheader("📊 個股分價量分佈圖")
-                for r in results:
-                    # 在每個 Expander 前方放置一個對應的錨點 (Anchor)
-                    st.markdown(f"<div id='stock-{r['代碼']}'></div>", unsafe_allow_html=True)
-                    
-                    with st.expander(f"📌 {r['代碼']} {r['個股名稱']} (現價: {r['當日現價']}) - 落在 {r['落點分價']}"):
-                        
-                        # 放置返回頂部總覽的按鈕連結
-                        st.markdown("[🔙 點擊此處返回上方【符合條件個股總覽】表](#summary-top)")
-                        
-                        col1, col2 = st.columns([1, 2])
-                        df_bins = pd.DataFrame(r['bins_data'])
-                        df_bins.set_index('區間標籤', inplace=True)
-                        
-                        with col1:
-                            st.markdown("**價格級距資料表 (🎯 標示為現價區間)**")
-                            st.dataframe(df_bins, use_container_width=True)
-                            
-                        with col2:
-                            st.markdown("**64日分價量分佈長條圖**")
-                            st.bar_chart(df_bins, horizontal=True)
+        # 建立一個佔位符來儲存分析結果
+        if 'analysis_results' not in st.session_state:
+            st.session_state.analysis_results = None
 
-            else:
-                st.warning("📊 分析完成，今日無符合條件的個股。")
+        # 只有在尚未分析時才顯示開始分析按鈕
+        if st.session_state.analysis_results is None:
+            if st.button("🚀 開始分析", type="primary"):
+                with st.spinner('連線抓取報價與分價量運算中，這可能需要幾分鐘的時間，請稍候...'):
+                    st.session_state.analysis_results = run_analysis(df_excel)
+                    st.rerun()  # 分析完畢後重新刷新網頁以隱藏按鈕
+        
+        results = st.session_state.analysis_results
+        
+        if results is not None:
+            # 判斷目前要顯示哪一個畫面 (總覽表 or 獨立個股圖表)
+            if st.session_state.selected_stock is None:
                 
+                # ==========================================
+                # 視圖 1：總覽表畫面
+                # ==========================================
+                if results:
+                    st.success(f"✅ 分析完成！共篩選出 **{len(results)}** 檔符合條件的個股。")
+                    
+                    excel_data = generate_excel(results)
+                    today_str = datetime.now().strftime("%Y%m%d")
+                    st.download_button(
+                        label="📥 下載完整含圖表的 Excel 報表",
+                        data=excel_data,
+                        file_name=f"分價每日分析_{today_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+                    st.subheader("📋 符合條件個股總覽")
+                    st.markdown("💡 *點擊名稱按鈕，即可展開該檔股票的詳細分價圖表*")
+                    
+                    # 自製版面來呈現帶有按鈕的表格
+                    col1, col2, col3, col4, col5 = st.columns([1, 2, 1.5, 1.5, 2])
+                    col1.markdown("**代碼**")
+                    col2.markdown("**個股名稱**")
+                    col3.markdown("**當日現價**")
+                    col4.markdown("**命中條件**")
+                    col5.markdown("**大量區範圍**")
+                    st.divider()
+                    
+                    for r in results:
+                        c1, c2, c3, c4, c5 = st.columns([1, 2, 1.5, 1.5, 2])
+                        c1.write(r['代碼'])
+                        
+                        # 按下按鈕時，將選擇的股票寫入 session state 並重整畫面
+                        if c2.button(f"🔍 {r['個股名稱']}", key=f"btn_{r['代碼']}", help="點擊查看詳細圖表", type="secondary"):
+                            st.session_state.selected_stock = r['代碼']
+                            st.rerun()
+                            
+                        c3.write(r['當日現價'])
+                        c4.write(r['落點分價'])
+                        c5.write(r['分價範圍'])
+                else:
+                    st.warning("📊 分析完成，今日無符合條件的個股。")
+            
+            else:
+                # ==========================================
+                # 視圖 2：單一個股詳細圖表畫面
+                # ==========================================
+                # 找出被點擊的那檔股票資料
+                target_r = next((r for r in results if r['代碼'] == st.session_state.selected_stock), None)
+                
+                if target_r:
+                    # 返回按鈕
+                    if st.button("🔙 返回符合條件個股總覽", type="primary"):
+                        st.session_state.selected_stock = None
+                        st.rerun()
+                        
+                    st.subheader(f"📌 {target_r['代碼']} {target_r['個股名稱']} (現價: {target_r['當日現價']})")
+                    st.markdown(f"**符合條件：** 落在 {target_r['落點分價']}")
+                    
+                    col1, col2 = st.columns([1, 2])
+                    
+                    # 轉換 bins 資料
+                    df_bins = pd.DataFrame(target_r['bins_data'])
+                    
+                    with col1:
+                        st.markdown("**價格級距資料表 (🎯 標示為現價區間)**")
+                        # 將區間標籤設為索引來顯示乾淨的資料表，高價已在第一列
+                        st.dataframe(df_bins.set_index('區間標籤'), use_container_width=True)
+                        
+                    with col2:
+                        st.markdown("**64日分價量分佈長條圖**")
+                        # 擷取順序陣列，用來強迫 Altair 依照「高價在上、低價在下」渲染 Y 軸
+                        sort_order = df_bins['區間標籤'].tolist()
+                        
+                        chart = alt.Chart(df_bins).mark_bar(color='#1f77b4').encode(
+                            x=alt.X('累積成交量:Q', title='累積成交量 (股)'),
+                            # Y 軸套用自訂的降冪順序 (sort=sort_order)
+                            y=alt.Y('區間標籤:N', title='價格級距區間 (TWD)', sort=sort_order),
+                            tooltip=['區間標籤', '累積成交量']
+                        ).properties(height=550)  # 稍微拉高圖表以符合 20 個抽屜的視覺
+                        
+                        st.altair_chart(chart, use_container_width=True)
+
     except Exception as e:
-        st.error(f"❌ 讀取 Excel 檔案時發生錯誤：{e}")
+        st.error(f"❌ 發生錯誤：{e}")
         
 else:
     st.error(f"❌ 找不到股票清單檔案：`{file_path}`")
-    st.info("💡 **除錯提示：** \n"
-            "1. 如果在您的電腦上執行，請確認 `TW50100.xlsx` 有跟 `app.py` 放在同一個資料夾。\n"
-            "2. 如果您已經部署到 **GitHub / Streamlit Cloud**，請確認您有將 `TW50100.xlsx` 檔案上傳到儲存庫（Repository）中！")
+    st.info("💡 如果在您的電腦上執行，請確認 `TW50100.xlsx` 有跟 `app.py` 放在同一個資料夾。")
