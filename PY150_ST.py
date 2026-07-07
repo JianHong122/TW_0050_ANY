@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 import re
 import io
-import os  # 新增 os 模組用來檢查檔案是否存在
+import os 
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -12,7 +12,7 @@ from openpyxl.chart import BarChart, Reference
 # ==========================================
 # 網頁基本設定 (設定為寬螢幕)
 # ==========================================
-st.set_page_config(page_title="台股分價量落點分析", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台灣50中100分價量試分析", layout="wide", page_icon="📈")
 
 # ==========================================
 # 台股跳動點與區間函式
@@ -257,14 +257,13 @@ def generate_excel(results):
     return output
 
 # ==========================================
-# Streamlit UI 介面 (修改為自動讀取模式)
+# Streamlit UI 介面 
 # ==========================================
-st.title("📈 台股精細化分價量落點分析 App")
+st.title("📈 台灣50中100分價量試分析")
 st.markdown("系統已設定為自動抓取近 64 日資料，將成交量依據台股跳動點精準均分，並找出收盤價位於「前三大成交量區間 ± 3 個抽屜」內的強勢/關鍵個股。")
 
 file_path = 'TW50100.xlsx'
 
-# 自動檢查檔案是否存在
 if os.path.exists(file_path):
     try:
         df_excel = pd.read_excel(file_path, engine='openpyxl', dtype=str)
@@ -277,19 +276,18 @@ if os.path.exists(file_path):
             if results:
                 st.success(f"✅ 分析完成！共篩選出 **{len(results)}** 檔符合條件的個股。")
                 
-                # --- 區塊 1：總覽表 ---
+                # --- 區塊 1：總覽表 (置入頂部錨點) ---
+                st.markdown("<div id='summary-top'></div>", unsafe_allow_html=True)
                 st.subheader("📋 符合條件個股總覽")
-                summary_data = []
+                
+                # 改用 Markdown 生成表格，以支援內部網頁錨點跳轉 (HTML Anchor)
+                md_table = "| 代碼 | 名稱 | 當日現價 | 命中條件 | 大量區範圍 |\n"
+                md_table += "|:---:|:---:|:---:|:---:|:---:|\n"
                 for r in results:
-                    summary_data.append({
-                        "代碼": r['代碼'],
-                        "名稱": r['個股名稱'],
-                        "當日現價": r['當日現價'],
-                        "命中條件": r['落點分價'],
-                        "大量區範圍": r['分價範圍']
-                    })
-                df_summary = pd.DataFrame(summary_data)
-                st.dataframe(df_summary, use_container_width=True, hide_index=True)
+                    # [顯示文字](#對應的ID) 這是 Markdown 的內部跳轉語法
+                    md_table += f"| {r['代碼']} | [{r['個股名稱']}](#stock-{r['代碼']}) | {r['當日現價']} | {r['落點分價']} | {r['分價範圍']} |\n"
+                
+                st.markdown(md_table)
                 
                 # --- 提供 Excel 下載按鈕 ---
                 excel_data = generate_excel(results)
@@ -306,9 +304,15 @@ if os.path.exists(file_path):
                 # --- 區塊 2：各別股票的詳細圖表 ---
                 st.subheader("📊 個股分價量分佈圖")
                 for r in results:
+                    # 在每個 Expander 前方放置一個對應的錨點 (Anchor)
+                    st.markdown(f"<div id='stock-{r['代碼']}'></div>", unsafe_allow_html=True)
+                    
                     with st.expander(f"📌 {r['代碼']} {r['個股名稱']} (現價: {r['當日現價']}) - 落在 {r['落點分價']}"):
-                        col1, col2 = st.columns([1, 2])
                         
+                        # 放置返回頂部總覽的按鈕連結
+                        st.markdown("[🔙 點擊此處返回上方【符合條件個股總覽】表](#summary-top)")
+                        
+                        col1, col2 = st.columns([1, 2])
                         df_bins = pd.DataFrame(r['bins_data'])
                         df_bins.set_index('區間標籤', inplace=True)
                         
@@ -327,7 +331,6 @@ if os.path.exists(file_path):
         st.error(f"❌ 讀取 Excel 檔案時發生錯誤：{e}")
         
 else:
-    # 若找不到檔案的防呆機制與提示
     st.error(f"❌ 找不到股票清單檔案：`{file_path}`")
     st.info("💡 **除錯提示：** \n"
             "1. 如果在您的電腦上執行，請確認 `TW50100.xlsx` 有跟 `app.py` 放在同一個資料夾。\n"
