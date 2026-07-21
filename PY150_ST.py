@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 
 # --- 介面基本設定 (針對手機優化) ---
-st.set_page_config(page_title="籌碼追蹤 APP", page_icon="📈", layout="centered")
+st.set_page_config(page_title="雞與牛追蹤 APP", page_icon="📈", layout="centered")
 CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -79,7 +79,7 @@ def get_data_for_date(date_str, force_update=False):
         return f_df, t_df
 
 # --- 主程式 UI 與邏輯 ---
-st.title("📊 法人籌碼近20日追蹤")
+st.title("📊 雞與牛")
 
 # 1. 讀取 TW150.xlsx
 try:
