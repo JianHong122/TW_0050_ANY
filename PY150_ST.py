@@ -156,35 +156,65 @@ progress_bar.empty()
 # 6. 資料整理與分頁顯示
 result_df = pd.DataFrame.from_dict(stats, orient='index')
 
-# 建立四個分頁
-tab1, tab2, tab3, tab4 = st.tabs(["🔥外資買", "📈投信買", "🩸外資賣", "📉投信賣"])
+# 優化 1：縮短 Tab 名稱，讓手機版四個 Tab 可以擠在同一行，不用下拉選單
+tab1, tab2, tab3, tab4 = st.tabs(["🔥外買", "📈投買", "🩸外賣", "📉投賣"])
+
+def format_mobile_df(df, sort_cols, main_col, sub_col, is_buy=True):
+    """手機版表格格式化工具：合併天數並縮減欄位"""
+    # 先做數值排序 (保留原本的 DataFrame 進行排序)
+    df_sorted = df.sort_values(by=sort_cols, ascending=[False, False, False]).head(50)
+    
+    # 建立手機版顯示用的 DataFrame
+    df_mobile = pd.DataFrame()
+    df_mobile['產業'] = df_sorted['Industry'].str[:4] # 產業名稱若太長，最多截斷顯示前4個字
+    df_mobile['名稱'] = df_sorted['Name']
+    
+    # 組合數據字串 "5日 / 20日"
+    if is_buy:
+        df_mobile['外資(5/20)'] = df_sorted['f_buy_5'].astype(str) + " / " + df_sorted['f_buy_20'].astype(str)
+        df_mobile['投信(5/20)'] = df_sorted['t_buy_5'].astype(str) + " / " + df_sorted['t_buy_20'].astype(str)
+    else:
+        df_mobile['外資(5/20)'] = df_sorted['f_sell_5'].astype(str) + " / " + df_sorted['f_sell_20'].astype(str)
+        df_mobile['投信(5/20)'] = df_sorted['t_sell_5'].astype(str) + " / " + df_sorted['t_sell_20'].astype(str)
+        
+    return df_mobile
 
 with tab1:
-    st.subheader("前 50 名 - 外資買超")
-    df_1 = result_df[['Industry', 'Name', 'f_buy_5', 't_buy_5', 'f_buy_20', 't_buy_20']].copy()
-    df_1.columns = ['產業類別', '個股名稱', '近五天外資買超天數', '近五天投信買超天數', '外資買超天數', '投信買超天數']
-    # 排序：優先看 20日外資買 > 近5日外資買 > 投信買
-    df_1 = df_1.sort_values(by=['外資買超天數', '近五天外資買超天數', '投信買超天數'], ascending=[False, False, False]).head(50)
+    st.caption("外資買超前 50 名 (單位: 天數)")
+    df_1 = format_mobile_df(
+        result_df, 
+        sort_cols=['f_buy_20', 'f_buy_5', 't_buy_20'], 
+        main_col='外資', sub_col='投信', is_buy=True
+    )
     st.dataframe(df_1, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("前 50 名 - 投信買超")
-    df_2 = result_df[['Industry', 'Name', 't_buy_5', 'f_buy_5', 't_buy_20', 'f_buy_20']].copy()
-    df_2.columns = ['產業類別', '個股名稱', '近五天投信買超天數', '近五天外資買超天數', '投信買超天數', '外資買超天數']
-    # 排序：優先看 20日投信買 > 近5日投信買 > 外資買
-    df_2 = df_2.sort_values(by=['投信買超天數', '近五天投信買超天數', '外資買超天數'], ascending=[False, False, False]).head(50)
+    st.caption("投信買超前 50 名 (單位: 天數)")
+    df_2 = format_mobile_df(
+        result_df, 
+        sort_cols=['t_buy_20', 't_buy_5', 'f_buy_20'], 
+        main_col='投信', sub_col='外資', is_buy=True
+    )
+    # 配合投信為主，把投信欄位移到前面
+    df_2 = df_2[['產業', '名稱', '投信(5/20)', '外資(5/20)']]
     st.dataframe(df_2, use_container_width=True, hide_index=True)
 
 with tab3:
-    st.subheader("前 50 名 - 外資賣超")
-    df_3 = result_df[['Industry', 'Name', 'f_sell_5', 't_sell_5', 'f_sell_20', 't_sell_20']].copy()
-    df_3.columns = ['產業類別', '個股名稱', '近五天外資賣超天數', '近五天投信賣超天數', '外資賣超天數', '投信賣超天數']
-    df_3 = df_3.sort_values(by=['外資賣超天數', '近五天外資賣超天數', '投信賣超天數'], ascending=[False, False, False]).head(50)
+    st.caption("外資賣超前 50 名 (單位: 天數)")
+    df_3 = format_mobile_df(
+        result_df, 
+        sort_cols=['f_sell_20', 'f_sell_5', 't_sell_20'], 
+        main_col='外資', sub_col='投信', is_buy=False
+    )
     st.dataframe(df_3, use_container_width=True, hide_index=True)
 
 with tab4:
-    st.subheader("前 50 名 - 投信賣超")
-    df_4 = result_df[['Industry', 'Name', 't_sell_5', 'f_sell_5', 't_sell_20', 'f_sell_20']].copy()
-    df_4.columns = ['產業類別', '個股名稱', '近五天投信賣超天數', '近五天外資賣超天數', '投信賣超天數', '外資賣超天數']
-    df_4 = df_4.sort_values(by=['投信賣超天數', '近五天投信賣超天數', '外資賣超天數'], ascending=[False, False, False]).head(50)
+    st.caption("投信賣超前 50 名 (單位: 天數)")
+    df_4 = format_mobile_df(
+        result_df, 
+        sort_cols=['t_sell_20', 't_sell_5', 'f_sell_20'], 
+        main_col='投信', sub_col='外資', is_buy=False
+    )
+    # 配合投信為主，把投信欄位移到前面
+    df_4 = df_4[['產業', '名稱', '投信(5/20)', '外資(5/20)']]
     st.dataframe(df_4, use_container_width=True, hide_index=True)
