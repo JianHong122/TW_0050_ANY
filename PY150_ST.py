@@ -1,150 +1,172 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-import re
+import pandas as pd
+import requests
+import os
+import time
 import io
-import os 
-import altair as alt
 from datetime import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
-from openpyxl.chart import BarChart, Reference
 
-# ==========================================
-# 網頁設定與 CSS 優化
-# ==========================================
-st.set_page_config(page_title="台灣50中100分價量試分析", layout="wide", page_icon="📈")
-hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_st_style, unsafe_allow_html=True)
+# --- 介面基本設定 (針對手機優化) ---
+st.set_page_config(page_title="籌碼追蹤 APP", page_icon="📈", layout="centered")
+CACHE_DIR = "cache_data"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Session State 初始化
-if 'selected_stock' not in st.session_state: st.session_state.selected_stock = None
-if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
+# --- 核心處理函數 ---
+@st.cache_data(ttl=3600)  # 快取1小時，避免頻繁呼叫 yfinance
+def get_trading_days(days=20):
+    """取得最近 N 個台股交易日"""
+    twii = yf.Ticker("^TWII")
+    # 抓取近 2 個月資料，確保有足夠的 20 個交易日
+    df = twii.history(period="2mo") 
+    dates = df.index[-days:].strftime('%Y%m%d').tolist()
+    return dates
 
-# ==========================================
-# 核心演算法函式
-# ==========================================
-def get_tick_size(price):
-    if price < 10: return 0.01
-    elif price < 50: return 0.05
-    elif price < 100: return 0.1
-    elif price < 500: return 0.5
-    elif price < 1000: return 1.0
-    else: return 5.0
+def clean_twse_number(val):
+    """清理證交所數字格式 (去除逗號)"""
+    if pd.isna(val):
+        return 0
+    try:
+        return float(str(val).replace(',', '').strip())
+    except:
+        return 0
 
-def generate_ticks(low, high):
-    low, high = round(low, 2), round(high, 2)
-    if low >= high: return [low]
-    ticks, curr = [], low
-    while curr <= high:
-        ticks.append(curr)
-        curr = round(curr + get_tick_size(curr), 2)
-    if ticks[-1] < high: ticks.append(high)
-    return list(dict.fromkeys(ticks))
-
-def run_analysis(df_excel):
-    # 自動偵測欄位，解決 KeyError
-    col_ticker = df_excel.columns[0]
-    col_name = df_excel.columns[1]
-    
-    results, serial_num = [], 1
-    total = len(df_excel)
-    progress_bar = st.progress(0)
-    
-    for row_idx, row in df_excel.iterrows():
-        progress_bar.progress((row_idx + 1) / total)
-        raw_ticker = str(row[col_ticker]).strip()
-        stock_name = str(row[col_name]).strip()
-        if raw_ticker.endswith('.0'): raw_ticker = raw_ticker[:-2]
+def fetch_twse_data(date_str, type_):
+    """抓取單日證交所 CSV 資料並解析"""
+    if type_ == 'foreign':
+        url = f"https://www.twse.com.tw/fund/TWT38U?date={date_str}&response=csv"
+    else:
+        url = f"https://www.twse.com.tw/fund/TWT44U?date={date_str}&response=csv"
         
-        try:
-            hist = yf.Ticker(f"{raw_ticker}.TW").history(period="6mo")
-            if hist.empty: hist = yf.Ticker(f"{raw_ticker}.TWO").history(period="6mo")
-            if hist.empty: continue
+    try:
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        
+        # 過濾出有包含逗號的有效行數 (避開證交所 CSV 頭尾的雜訊)
+        lines = [line for line in res.text.split('\n') if len(line.split('",')) >= 6]
+        text_data = '\n'.join(lines)
+        
+        # 使用 pandas 讀取
+        df = pd.read_csv(io.StringIO(text_data), header=None, on_bad_lines='skip')
+        
+        # 依需求擷取欄位: B欄(1)=代號, C欄(2)=名稱, F欄(5)=買賣超
+        if df.shape[1] > 5:
+            df = df[[1, 2, 5]]
+            df.columns = ['Code', 'Name', 'Net']
+            # 清理股票代號 (證交所常有 ="2330" 這種格式)
+            df['Code'] = df['Code'].astype(str).str.replace('=', '').str.replace('"', '').str.strip()
+            # 清理買賣超金額
+            df['Net'] = df['Net'].apply(clean_twse_number)
+            return df
+    except Exception as e:
+        # 忽略單日無資料或下載失敗的錯誤 (如颱風假等)
+        pass
+        
+    return pd.DataFrame(columns=['Code', 'Name', 'Net'])
+
+def get_data_for_date(date_str, force_update=False):
+    """取得資料：優先從本地 cache 讀取，沒有或強制更新才下載"""
+    f_path = os.path.join(CACHE_DIR, f"{date_str}_foreign.csv")
+    t_path = os.path.join(CACHE_DIR, f"{date_str}_trust.csv")
+
+    if force_update or not (os.path.exists(f_path) and os.path.exists(t_path)):
+        # 下載資料
+        f_df = fetch_twse_data(date_str, 'foreign')
+        t_df = fetch_twse_data(date_str, 'trust')
+        
+        # 存入快取
+        if not f_df.empty:
+            f_df.to_csv(f_path, index=False, encoding='utf-8-sig')
+        if not t_df.empty:
+            t_df.to_csv(t_path, index=False, encoding='utf-8-sig')
+            
+        time.sleep(2.5)  # 證交所防爬蟲機制，需暫停
+        return f_df, t_df
+    else:
+        # 從本地讀取
+        f_df = pd.read_csv(f_path, dtype={'Code': str})
+        t_df = pd.read_csv(t_path, dtype={'Code': str})
+        return f_df, t_df
+
+# --- 主程式 UI 與邏輯 ---
+st.title("📊 法人籌碼近20日追蹤")
+
+# 1. 讀取 TW150.xlsx (假設檔案與 app.py 在同一層目錄)
+try:
+    tw150_df = pd.read_excel('TW150.xlsx', header=None, dtype=str)
+    # A欄=代號(0), B欄=名稱(1)
+    target_stocks = dict(zip(tw150_df[0].str.strip(), tw150_df[1].str.strip()))
+except Exception as e:
+    st.error("找不到 TW150.xlsx，請確認檔案是否存在。")
+    st.stop()
+
+# 2. 獲取近 20 日交易日
+trading_days = get_trading_days(20)
+
+# 3. 側邊欄設定 / 強制更新按鈕
+with st.sidebar:
+    st.header("⚙️ 設定與狀態")
+    st.write(f"📊 監測日期範圍:\n {trading_days[0]} ~ {trading_days[-1]}")
+    st.write(f"🎯 觀察名單數量: {len(target_stocks)} 檔")
+    force_update = st.button("🔄 強制重新下載/更新資料")
+
+# 4. 下載與運算資料
+# 初始化統計字典
+stats = {code: {'Name': name, 'f_buy': 0, 't_buy': 0, 'f_sell': 0, 't_sell': 0} 
+         for code, name in target_stocks.items()}
+
+progress_text = "讀取/下載資料中，請稍候..."
+progress_bar = st.progress(0, text=progress_text)
+
+for idx, date in enumerate(trading_days):
+    f_df, t_df = get_data_for_date(date, force_update)
+    
+    # 計算外資天數
+    if not f_df.empty:
+        # 只留下在 TW150 清單中的股票
+        f_filtered = f_df[f_df['Code'].isin(target_stocks.keys())]
+        for _, row in f_filtered.iterrows():
+            code = row['Code']
+            if row['Net'] > 0:
+                stats[code]['f_buy'] += 1
+            elif row['Net'] < 0:
+                stats[code]['f_sell'] += 1
                 
-            hist_64 = hist.tail(64).copy()
-            curr_p = round(hist_64['Close'].iloc[-1], 2)
-            max_p, min_p = hist_64['High'].max(), hist_64['Low'].min()
-            if max_p == min_p: max_p, min_p = min_p * 1.05, min_p * 0.95
-            
-            bin_size = (max_p - min_p) / 20
-            curr_idx = min(19, max(0, int((curr_p - min_p) / bin_size)))
-            
-            bins = [{'idx': i, 'start': min_p + i*bin_size, 'end': min_p + (i+1)*bin_size, 'vol': 0} for i in range(20)]
-            
-            price_vol = {}
-            for _, d in hist_64.iterrows():
-                vol_c, vol_o, vol_r = d['Volume']*0.3, d['Volume']*0.05, d['Volume']*0.65
-                price_vol[round(d['Close'],2)] = price_vol.get(round(d['Close'],2), 0) + vol_c
-                price_vol[round(d['Open'],2)] = price_vol.get(round(d['Open'],2), 0) + vol_o
-                ticks = generate_ticks(d['Low'], d['High'])
-                for t in ticks: price_vol[t] = price_vol.get(t, 0) + (vol_r / len(ticks))
-            
-            for p, v in price_vol.items():
-                idx = min(19, max(0, int((p - min_p) / bin_size)))
-                bins[idx]['vol'] += v
-            
-            top3 = sorted([b for b in bins if b['vol'] > 0], key=lambda x: x['vol'], reverse=True)[:3]
-            for rank, t_bin in enumerate(top3, 1):
-                if t_bin['idx'] - 3 <= curr_idx <= t_bin['idx'] + 3:
-                    disp = [{'區間標籤': f"{'🎯 ' if b['idx']==curr_idx else ''}{b['start']:.2f} ~ {b['end']:.2f}", '累積成交量': int(b['vol'])} for b in bins]
-                    disp.reverse()
-                    results.append({'代碼': raw_ticker, '個股名稱': stock_name, '當日現價': curr_p, '落點分價': f"第{rank}大量", '分價範圍': f"{t_bin['start']:.2f} ~ {t_bin['end']:.2f}", 'bins_data': disp})
-                    break
-        except: continue
-    progress_bar.empty()
-    return results
+    # 計算投信天數
+    if not t_df.empty:
+        t_filtered = t_df[t_df['Code'].isin(target_stocks.keys())]
+        for _, row in t_filtered.iterrows():
+            code = row['Code']
+            if row['Net'] > 0:
+                stats[code]['t_buy'] += 1
+            elif row['Net'] < 0:
+                stats[code]['t_sell'] += 1
+                
+    # 更新進度條
+    progress_bar.progress((idx + 1) / 20, text=f"正在處理: {date} ({idx+1}/20)")
 
-# ==========================================
-# 主介面邏輯
-# ==========================================
-st.title("📈 台灣50中100分價量試分析")
-file_path = 'TW50100.xlsx'
+progress_bar.empty() # 跑完隱藏進度條
 
-if os.path.exists(file_path):
-    # 讀取時自動偵測標題列，若無標題則 header=None
-    df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
+# 5. 資料整理與排序
+result_df = pd.DataFrame.from_dict(stats, orient='index')
+
+# 建立兩個分頁 (適合手機滑動操作)
+tab1, tab2 = st.tabs(["🔥 外資買超為主", "📈 投信買超為主"])
+
+with tab1:
+    st.subheader("前 30 名 - 外資買超天數排序")
+    df_foreign = result_df[['Name', 'f_buy', 't_buy', 'f_sell', 't_sell']].copy()
+    df_foreign.columns = ['個股名稱', '外資買超天數', '投信買超天數', '外資賣超天數', '投信賣超天數']
+    df_foreign = df_foreign.sort_values(by=['外資買超天數', '投信買超天數'], ascending=[False, False]).head(30)
     
-    if st.session_state.analysis_results is None:
-        if st.button("🚀 開始分析", type="primary"):
-            st.session_state.analysis_results = run_analysis(df)
-            st.rerun()
+    # 設定 DataFrame 顯示樣式隱藏 index，在手機上更乾淨
+    st.dataframe(df_foreign, use_container_width=True, hide_index=True)
+
+with tab2:
+    st.subheader("前 30 名 - 投信買超天數排序")
+    df_trust = result_df[['Name', 't_buy', 'f_buy', 't_sell', 'f_sell']].copy()
+    df_trust.columns = ['個股名稱', '投信買超天數', '外資買超天數', '投信賣超天數', '外資賣超天數']
+    # 依循需求：以投信為主時，遇相同天數再以外資買超天數作為輔助排序
+    df_trust = df_trust.sort_values(by=['投信買超天數', '外資買超天數'], ascending=[False, False]).head(30)
     
-    if st.session_state.analysis_results:
-        if st.session_state.selected_stock is None:
-            st.subheader("📋 符合條件個股總覽")
-            if st.button("🧹 清除並重新分析"): 
-                st.session_state.analysis_results = None
-                st.rerun()
-            for r in st.session_state.analysis_results:
-                with st.container(border=True):
-                    c1, c2 = st.columns([3, 1])
-                    c1.markdown(f"### {r['個股名稱']} ({r['代碼']})")
-                    if c2.button("🔍 查看", key=f"btn_{r['代碼']}"):
-                        st.session_state.selected_stock = r['代碼']
-                        st.rerun()
-                    st.caption(f"現價: {r['當日現價']} | 命中: {r['落點分價']}")
-                    st.write(f"大量區: `{r['分價範圍']}`")
-        else:
-            target = next((r for r in st.session_state.analysis_results if r['代碼'] == st.session_state.selected_stock), None)
-            if target:
-                if st.button("🔙 返回總覽", type="primary"):
-                    st.session_state.selected_stock = None
-                    st.rerun()
-                st.subheader(f"📌 {target['代碼']} {target['個股名稱']}")
-                df_bins = pd.DataFrame(target['bins_data'])
-                c1, c2 = st.columns([1, 2])
-                with c1: st.dataframe(df_bins.set_index('區間標籤'), use_container_width=True)
-                with c2:
-                    chart = alt.Chart(df_bins).mark_bar().encode(
-                        x='累積成交量:Q', y=alt.Y('區間標籤:N', sort=df_bins['區間標籤'].tolist()), tooltip=['區間標籤', '累積成交量']
-                    ).properties(height=550)
-                    st.altair_chart(chart, use_container_width=True)
-else:
-    st.error(f"❌ 找不到 {file_path}，請確認檔案已上傳至 GitHub 儲存庫。")
+    st.dataframe(df_trust, use_container_width=True, hide_index=True)
