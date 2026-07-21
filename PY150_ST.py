@@ -13,11 +13,10 @@ CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # --- 核心處理函數 ---
-@st.cache_data(ttl=3600)  # 快取1小時，避免頻繁呼叫 yfinance
+@st.cache_data(ttl=3600)
 def get_trading_days(days=20):
     """取得最近 N 個台股交易日"""
     twii = yf.Ticker("^TWII")
-    # 抓取近 2 個月資料，確保有足夠的 20 個交易日
     df = twii.history(period="2mo") 
     dates = df.index[-days:].strftime('%Y%m%d').tolist()
     return dates
@@ -42,24 +41,18 @@ def fetch_twse_data(date_str, type_):
         res = requests.get(url, timeout=10)
         res.raise_for_status()
         
-        # 過濾出有包含逗號的有效行數 (避開證交所 CSV 頭尾的雜訊)
         lines = [line for line in res.text.split('\n') if len(line.split('",')) >= 6]
         text_data = '\n'.join(lines)
         
-        # 使用 pandas 讀取
         df = pd.read_csv(io.StringIO(text_data), header=None, on_bad_lines='skip')
         
-        # 依需求擷取欄位: B欄(1)=代號, C欄(2)=名稱, F欄(5)=買賣超
         if df.shape[1] > 5:
             df = df[[1, 2, 5]]
             df.columns = ['Code', 'Name', 'Net']
-            # 清理股票代號 (證交所常有 ="2330" 這種格式)
             df['Code'] = df['Code'].astype(str).str.replace('=', '').str.replace('"', '').str.strip()
-            # 清理買賣超金額
             df['Net'] = df['Net'].apply(clean_twse_number)
             return df
     except Exception as e:
-        # 忽略單日無資料或下載失敗的錯誤 (如颱風假等)
         pass
         
     return pd.DataFrame(columns=['Code', 'Name', 'Net'])
@@ -70,20 +63,17 @@ def get_data_for_date(date_str, force_update=False):
     t_path = os.path.join(CACHE_DIR, f"{date_str}_trust.csv")
 
     if force_update or not (os.path.exists(f_path) and os.path.exists(t_path)):
-        # 下載資料
         f_df = fetch_twse_data(date_str, 'foreign')
         t_df = fetch_twse_data(date_str, 'trust')
         
-        # 存入快取
         if not f_df.empty:
             f_df.to_csv(f_path, index=False, encoding='utf-8-sig')
         if not t_df.empty:
             t_df.to_csv(t_path, index=False, encoding='utf-8-sig')
             
-        time.sleep(2.5)  # 證交所防爬蟲機制，需暫停
+        time.sleep(2.5) 
         return f_df, t_df
     else:
-        # 從本地讀取
         f_df = pd.read_csv(f_path, dtype={'Code': str})
         t_df = pd.read_csv(t_path, dtype={'Code': str})
         return f_df, t_df
@@ -91,82 +81,110 @@ def get_data_for_date(date_str, force_update=False):
 # --- 主程式 UI 與邏輯 ---
 st.title("📊 法人籌碼近20日追蹤")
 
-# 1. 讀取 TW150.xlsx (假設檔案與 app.py 在同一層目錄)
+# 1. 讀取 TW150.xlsx
 try:
+    # 讀取 Excel，A欄=0, B欄=1, C欄=2
     tw150_df = pd.read_excel('TW150.xlsx', header=None, dtype=str)
-    # A欄=代號(0), B欄=名稱(1)
-    target_stocks = dict(zip(tw150_df[0].str.strip(), tw150_df[1].str.strip()))
+    target_stocks = {}
+    for _, row in tw150_df.iterrows():
+        code = str(row[0]).strip()
+        name = str(row[1]).strip()
+        # 處理 C 欄可能為空的情況，確保格式乾淨一致
+        industry = str(row[2]).strip() if len(row) > 2 and pd.notna(row[2]) else "無分類"
+        target_stocks[code] = {'Name': name, 'Industry': industry}
 except Exception as e:
-    st.error("找不到 TW150.xlsx，請確認檔案是否存在。")
+    st.error("找不到 TW150.xlsx，或檔案格式有誤。請確認 A 欄為代號，B 欄為名稱，C 欄為產業類別。")
     st.stop()
 
-# 2. 獲取近 20 日交易日
+# 2. 獲取交易日並切分近 5 日
 trading_days = get_trading_days(20)
+recent_5_days = trading_days[-5:] # 取最後 5 天
 
-# 3. 側邊欄設定 / 強制更新按鈕
+# 3. 側邊欄設定
 with st.sidebar:
-    st.header("⚙️ 設定與狀態")
-    st.write(f"📊 監測日期範圍:\n {trading_days[0]} ~ {trading_days[-1]}")
-    st.write(f"🎯 觀察名單數量: {len(target_stocks)} 檔")
-    force_update = st.button("🔄 強制重新下載/更新資料")
+    st.header("⚙️ 狀態")
+    st.write(f"📅 20日範圍:\n {trading_days[0]} ~ {trading_days[-1]}")
+    st.write(f"🔥 近5日範圍:\n {recent_5_days[0]} ~ {recent_5_days[-1]}")
+    st.write(f"🎯 觀察清單: {len(target_stocks)} 檔")
+    force_update = st.button("🔄 強制更新資料")
 
-# 4. 下載與運算資料
-# 初始化統計字典
-stats = {code: {'Name': name, 'f_buy': 0, 't_buy': 0, 'f_sell': 0, 't_sell': 0} 
-         for code, name in target_stocks.items()}
+# 4. 初始化統計字典 (加入近5日欄位與產業)
+stats = {
+    code: {
+        'Industry': info['Industry'], 'Name': info['Name'], 
+        'f_buy_20': 0, 't_buy_20': 0, 'f_sell_20': 0, 't_sell_20': 0,
+        'f_buy_5': 0, 't_buy_5': 0, 'f_sell_5': 0, 't_sell_5': 0
+    } 
+    for code, info in target_stocks.items()
+}
 
-progress_text = "讀取/下載資料中，請稍候..."
-progress_bar = st.progress(0, text=progress_text)
+progress_bar = st.progress(0, text="讀取/下載資料中，請稍候...")
 
+# 5. 資料運算
 for idx, date in enumerate(trading_days):
     f_df, t_df = get_data_for_date(date, force_update)
+    is_recent_5 = date in recent_5_days # 判斷是否為近 5 日
     
-    # 計算外資天數
+    # 計算外資
     if not f_df.empty:
-        # 只留下在 TW150 清單中的股票
         f_filtered = f_df[f_df['Code'].isin(target_stocks.keys())]
         for _, row in f_filtered.iterrows():
             code = row['Code']
             if row['Net'] > 0:
-                stats[code]['f_buy'] += 1
+                stats[code]['f_buy_20'] += 1
+                if is_recent_5: stats[code]['f_buy_5'] += 1
             elif row['Net'] < 0:
-                stats[code]['f_sell'] += 1
+                stats[code]['f_sell_20'] += 1
+                if is_recent_5: stats[code]['f_sell_5'] += 1
                 
-    # 計算投信天數
+    # 計算投信
     if not t_df.empty:
         t_filtered = t_df[t_df['Code'].isin(target_stocks.keys())]
         for _, row in t_filtered.iterrows():
             code = row['Code']
             if row['Net'] > 0:
-                stats[code]['t_buy'] += 1
+                stats[code]['t_buy_20'] += 1
+                if is_recent_5: stats[code]['t_buy_5'] += 1
             elif row['Net'] < 0:
-                stats[code]['t_sell'] += 1
+                stats[code]['t_sell_20'] += 1
+                if is_recent_5: stats[code]['t_sell_5'] += 1
                 
-    # 更新進度條
     progress_bar.progress((idx + 1) / 20, text=f"正在處理: {date} ({idx+1}/20)")
 
-progress_bar.empty() # 跑完隱藏進度條
+progress_bar.empty()
 
-# 5. 資料整理與排序
+# 6. 資料整理與分頁顯示
 result_df = pd.DataFrame.from_dict(stats, orient='index')
 
-# 建立兩個分頁 (適合手機滑動操作)
-tab1, tab2 = st.tabs(["🔥 外資買超為主", "📈 投信買超為主"])
+# 建立四個分頁
+tab1, tab2, tab3, tab4 = st.tabs(["🔥外資買", "📈投信買", "🩸外資賣", "📉投信賣"])
 
 with tab1:
-    st.subheader("前 30 名 - 外資買超天數排序")
-    df_foreign = result_df[['Name', 'f_buy', 't_buy', 'f_sell', 't_sell']].copy()
-    df_foreign.columns = ['個股名稱', '外資買超天數', '投信買超天數', '外資賣超天數', '投信賣超天數']
-    df_foreign = df_foreign.sort_values(by=['外資買超天數', '投信買超天數'], ascending=[False, False]).head(30)
-    
-    # 設定 DataFrame 顯示樣式隱藏 index，在手機上更乾淨
-    st.dataframe(df_foreign, use_container_width=True, hide_index=True)
+    st.subheader("前 50 名 - 外資買超")
+    df_1 = result_df[['Industry', 'Name', 'f_buy_5', 't_buy_5', 'f_buy_20', 't_buy_20']].copy()
+    df_1.columns = ['產業類別', '個股名稱', '近五天外資買超天數', '近五天投信買超天數', '外資買超天數', '投信買超天數']
+    # 排序：優先看 20日外資買 > 近5日外資買 > 投信買
+    df_1 = df_1.sort_values(by=['外資買超天數', '近五天外資買超天數', '投信買超天數'], ascending=[False, False, False]).head(50)
+    st.dataframe(df_1, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("前 30 名 - 投信買超天數排序")
-    df_trust = result_df[['Name', 't_buy', 'f_buy', 't_sell', 'f_sell']].copy()
-    df_trust.columns = ['個股名稱', '投信買超天數', '外資買超天數', '投信賣超天數', '外資賣超天數']
-    # 依循需求：以投信為主時，遇相同天數再以外資買超天數作為輔助排序
-    df_trust = df_trust.sort_values(by=['投信買超天數', '外資買超天數'], ascending=[False, False]).head(30)
-    
-    st.dataframe(df_trust, use_container_width=True, hide_index=True)
+    st.subheader("前 50 名 - 投信買超")
+    df_2 = result_df[['Industry', 'Name', 't_buy_5', 'f_buy_5', 't_buy_20', 'f_buy_20']].copy()
+    df_2.columns = ['產業類別', '個股名稱', '近五天投信買超天數', '近五天外資買超天數', '投信買超天數', '外資買超天數']
+    # 排序：優先看 20日投信買 > 近5日投信買 > 外資買
+    df_2 = df_2.sort_values(by=['投信買超天數', '近五天投信買超天數', '外資買超天數'], ascending=[False, False, False]).head(50)
+    st.dataframe(df_2, use_container_width=True, hide_index=True)
+
+with tab3:
+    st.subheader("前 50 名 - 外資賣超")
+    df_3 = result_df[['Industry', 'Name', 'f_sell_5', 't_sell_5', 'f_sell_20', 't_sell_20']].copy()
+    df_3.columns = ['產業類別', '個股名稱', '近五天外資賣超天數', '近五天投信賣超天數', '外資賣超天數', '投信賣超天數']
+    df_3 = df_3.sort_values(by=['外資賣超天數', '近五天外資賣超天數', '投信賣超天數'], ascending=[False, False, False]).head(50)
+    st.dataframe(df_3, use_container_width=True, hide_index=True)
+
+with tab4:
+    st.subheader("前 50 名 - 投信賣超")
+    df_4 = result_df[['Industry', 'Name', 't_sell_5', 'f_sell_5', 't_sell_20', 'f_sell_20']].copy()
+    df_4.columns = ['產業類別', '個股名稱', '近五天投信賣超天數', '近五天外資賣超天數', '投信賣超天數', '外資賣超天數']
+    df_4 = df_4.sort_values(by=['投信賣超天數', '近五天投信賣超天數', '外資賣超天數'], ascending=[False, False, False]).head(50)
+    st.dataframe(df_4, use_container_width=True, hide_index=True)
