@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 
 # --- 介面基本設定 (針對手機優化) ---
-st.set_page_config(page_title="雞與牛追蹤 APP", page_icon="📈", layout="centered")
+st.set_page_config(page_title="雞與牛", page_icon="📈", layout="centered")
 CACHE_DIR = "cache_data"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
